@@ -1,0 +1,21 @@
+.{
+    .name = .dnsmasq,
+    .version = "2.93.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xcd50a6eb026cf8b8, // Changing this has security and trust implications.
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "generated.zig",
+        "LICENSE",
+        "README.md",
+    },
+
+    .dependencies = .{
+        .upstream = .{
+            .url = "https://thekelleys.org.uk/dnsmasq/dnsmasq-2.93.tar.xz",
+            .hash = "N-V-__8AAEFZNQBHd53gdas1GOeuBrl3UIEdm798GGW817ml",
+        },
+    },
+}
