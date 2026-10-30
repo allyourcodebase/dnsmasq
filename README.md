@@ -60,6 +60,7 @@ run.addArgs(&.{ "--keep-in-foreground", "--port=5353" });
   -Dstrip=[bool]               Omit debug information
   -Dpic=[bool]                 Produce Position Independent Code. Defaults to the target's default
   -Dbroken_rtc=[bool]          For systems without a real-time clock keeping time across reboots: use uptime, and store lease lengths instead of expiry times. Defaults to false
+  -Dotel=[bool]                Export metrics and logs with OpenTelemetry (OTLP over HTTP, to localhost:4318 unless the OTEL_* environment variables say otherwise). Patches dnsmasq. Needs Zig 0.17 or later. Defaults to false
   -Ddhcp=[bool]                Enable the DHCPv4 server (disabling it also disables DHCPv6). Defaults to true
   -Ddhcp6=[bool]               Enable the DHCPv6 server and router advertisements. Defaults to true
   -Dtftp=[bool]                Enable the TFTP server. Defaults to true
@@ -73,6 +74,35 @@ run.addArgs(&.{ "--keep-in-foreground", "--port=5353" });
 ```
 
 These map to the `NO_*` compile-time options of upstream's `config.h`, and the defaults are upstream's.
+
+## OpenTelemetry
+
+Experimental: `-Dotel=true` builds dnsmasq with hooks which export its metrics and logs to a collector, with [opentelemetry-zig](https://github.com/open-telemetry/opentelemetry-zig), an alpha SDK.
+It needs Zig 0.17 or later, which is also the only case in which the SDK is fetched, and it adds about 1.8 MB: 0.5 MB become 2.3 MB for an `x86_64-linux-musl` build in `ReleaseSafe`, stripped.
+Three of upstream's files are patched, see [`UPDATE.md`](UPDATE.md).
+
+```shell
+zig build -p ~/.local -Doptimize=ReleaseSafe -Dstrip=true -Dotel=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 ~/.local/bin/dnsmasq --keep-in-foreground
+```
+
+Data is sent with OTLP over HTTP, to a collector on the same machine unless told otherwise: `127.0.0.1:4318`, an address rather than `localhost` so that exporting never needs a lookup by dnsmasq itself.
+The standard variables select another one: `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_PROTOCOL` (`http/protobuf` or `http/json`: gRPC is not built), `OTEL_SERVICE_NAME` (`dnsmasq`), `OTEL_RESOURCE_ATTRIBUTES`, and `OTEL_METRIC_EXPORT_INTERVAL` (here 10 seconds rather than 60: the SDK keeps every measurement until it exports them).
+
+| Name | Kind | What |
+|:-----|:-----|:-----|
+| `dnsmasq.<counter>` | cumulative counter | Each of dnsmasq's own counters, reported as they are, once it is not zero: `dns_queries_forwarded`, `dns_local_answered`, `dns_auth_answered`, `dns_cache_inserted`, `dhcp_ack`, ... |
+| `dnsmasq.tcp_connections` | gauge | How many processes are serving TCP queries now |
+| `dnsmasq.server.queries`, `.failed_queries`, `.nxdomain_replies`, `.retries` | cumulative counter | The same for each upstream server, as `server.address`. A server which goes away keeps its last values |
+| `dnsmasq.upstream.duration` | histogram, ms | The time from sending a query to an upstream server to its reply, by `server.address` |
+| logs | | What dnsmasq logs, with its syslog priority as the severity (the number [OpenTelemetry maps it to](https://opentelemetry.io/docs/specs/otel/logs/data-model-appendix/#appendix-b-severitynumber-example-mappings), and its name as the text), and `dnsmasq.facility` (`dhcp`, `tftp`, `script` or `debug`, and none for DNS). Queries are only logged with `--log-queries` |
+
+Counters are cumulative, as dnsmasq keeps them: rates, such as queries per second, and deltas are for the collector or the backend to compute.
+Answers from the cache are not in the histogram, as they do not wait for anyone.
+
+What is not exported:
+- What dnsmasq logs while starting: the SDK starts once it runs, as it uses threads, which do not survive the forks of the daemonization.
+- Queries over TCP, which a forked process answers, whose counters and logs are lost with it. Only the number of such processes is observed. With `--no-daemon`, there are no such forks.
 
 ## Limitations
 
