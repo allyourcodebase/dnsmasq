@@ -7,19 +7,32 @@ It builds the `dnsmasq` executable from the upstream release, so that it can be 
 
 | Architecture \ OS | Linux | macOS | FreeBSD | NetBSD | OpenBSD |
 |:------------------|:-----:|:-----:|:-------:|:------:|:-------:|
-| x86_64            | ✅    | ⚠️    | ✅      | ✅     | ✅      |
+| x86_64            | ✅    | ?     | ✅      | ✅     | ✅      |
 | arm 64            | ✅    | ✅    | ✅      | ✅     | ✅      |
 
 Also builds for Linux on `arm`, `x86`, `riscv64`, `powerpc64le`, `s390x` and `loongarch64`, with both glibc and musl.
-
-Cross-compiling to all of those is tested in CI, as is running the smoke tests on Linux and macOS.
-x86_64 macOS is only built natively, by an Intel Mac: see [macOS](#macos).
 
 | Refname          | dnsmasq version | Zig `0.18-dev` | Zig `0.17.x` | Zig `0.16.x` |
 |:-----------------|:----------------|:--------------:|:------------:|:------------:|
 | `master`, `2.93` | `v2.93`         | ✅             | ✅           | ✅           |
 
-## Use
+## Install
+
+Clone this repository, and install to a prefix of your choice, for example `~/.local`:
+```shell
+zig build -p ~/.local -Doptimize=ReleaseSafe -Dstrip=true
+```
+
+This installs `dnsmasq` in `~/.local/bin`, and its manual page in `~/.local/share/man/man8`.
+The prefix defaults to `zig-out`.
+Zig downloads the dnsmasq sources itself: there is nothing else to install.
+
+To build for another machine, add `-Dtarget` and copy the prefix over, for example `-Dtarget=aarch64-linux-musl` for a statically linked executable that runs on any 64-bit ARM Linux.
+Zig can only target macOS from a Mac, and only for the Mac itself: see [Limitations](#macos).
+
+Options are given the same way, for example `-Dtftp=false` to leave the TFTP server out: see [Options](#options).
+
+## Use as a dependency
 
 Add the dependency to your `build.zig.zon` by running the following command:
 ```shell
@@ -39,7 +52,6 @@ const run = b.addRunArtifact(dnsmasq.artifact("dnsmasq"));
 run.addArgs(&.{ "--keep-in-foreground", "--port=5353" });
 ```
 
-Building this package directly installs `dnsmasq` in `zig-out/bin`, and its manual page in `zig-out/share/man/man8`.
 `zig build test` runs smoke tests: the version it reports, and that it accepts both upstream's example configuration and one using the enabled features.
 
 ## Options

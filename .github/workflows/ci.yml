@@ -1,0 +1,81 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [master]
+
+  pull_request:
+    branches: [master]
+
+  workflow_dispatch:
+
+# The CPU is part of every cache key, and runners' CPUs vary: every build targets the baseline CPU to reuse the cache
+
+jobs:
+  # Zig cannot cross-compile to macOS, see the readme: no `-Dtarget` here
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        zig-version: ["master", "0.17.0", "0.16.0"]
+
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig-version }}
+
+      - name: Build and run the smoke tests
+        run: zig build -Dcpu=baseline --summary new test
+      - name: Build and run the smoke tests with every optional feature disabled
+        run: >
+          zig build -Dcpu=baseline --summary new test
+          -Ddhcp=false -Ddhcp6=false -Dtftp=false -Dscript=false -Dauth=false
+          -Dipset=false -Dloop=false -Ddumpfile=false -Dinotify=false -Did=false
+      - name: Build optimized
+        run: zig build -Dcpu=baseline --summary new -Doptimize=ReleaseSmall -Dstrip=true
+
+  # The runner is x86_64 Linux: those targets are tested, the others only built
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.17.0"
+
+      - name: Check formatting
+        run: zig fmt --ast-check --check .
+
+      - name: Build and run the smoke tests
+        run: |
+          for target in x86_64-linux-musl x86_64-linux-gnu; do
+            echo "::group::$target"
+            zig build -Dtarget=$target -Dcpu=baseline --summary new test
+            echo "::endgroup::"
+          done
+      - name: Build and run the smoke tests with every optional feature disabled
+        run: >
+          zig build -Dtarget=x86_64-linux-musl -Dcpu=baseline --summary new test
+          -Ddhcp=false -Ddhcp6=false -Dtftp=false -Dscript=false -Dauth=false
+          -Dipset=false -Dloop=false -Ddumpfile=false -Dinotify=false -Did=false
+
+      - name: Cross-compile
+        run: |
+          for target in \
+            x86_64-linux-musl aarch64-linux-musl arm-linux-musleabihf x86-linux-musl \
+            riscv64-linux-musl powerpc64le-linux-musl s390x-linux-musl loongarch64-linux-musl \
+            x86_64-linux-gnu aarch64-linux-gnu x86-linux-gnu \
+            x86_64-freebsd aarch64-freebsd x86_64-netbsd aarch64-netbsd x86_64-openbsd aarch64-openbsd
+          do
+            echo "::group::$target"
+            zig build -Dtarget=$target -Dcpu=baseline -Doptimize=ReleaseSafe
+            echo "::endgroup::"
+          done
