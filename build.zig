@@ -189,14 +189,29 @@ const otel_patches = [_]Patch{
             .{ .where = .after, .line = "int timeout = fast_retry(now);", .text = "      dnsmasq_otel_poll();" },
         },
     },
-    .{ .file = "forward.c", .edits = &.{
-        include_otel,
-        .{
-            .where = .after,
-            .line = "server->query_latency = server->mma_latency/128;",
-            .text = "  dnsmasq_otel_upstream_reply(server, dnsmasq_milliseconds() - forward->forward_timestamp);",
+    .{
+        .file = "forward.c",
+        .edits = &.{
+            include_otel,
+            .{
+                .where = .after,
+                .line = "server->query_latency = server->mma_latency/128;",
+                .text = "  dnsmasq_otel_upstream_reply(server, dnsmasq_milliseconds() - forward->forward_timestamp);",
+            },
+            // The time to answer a query, from when it arrives until the reply is sent, by dnsmasq itself or once an upstream server answered
+            .{ .where = .before, .line = "dst_addr_4.s_addr = dst_addr.addr4.s_addr = 0;", .text = "  dnsmasq_otel_query_received();" },
+            .{ .where = .before, .line = "daemon->metrics[metric]++;", .text = "      dnsmasq_otel_query_answered_locally();" },
+            // Answered by dnsmasq too: an address it was given, or an error
+            .{
+                .where = .after,
+                .line = "send_from(udpfd, option_bool(OPT_NOWILD) || option_bool(OPT_CLEVERBIND), (char *)header, plen, udpaddr, dst_addr, dst_iface);",
+                .text = "      dnsmasq_otel_query_answered_locally();",
+            },
+            .{ .where = .after, .line = "src->orig_id = id;", .text = "\t  dnsmasq_otel_query_forwarded(src);" },
+            .{ .where = .after, .line = "forward->frec_src.orig_id = ntohs(header->id);", .text = "      dnsmasq_otel_query_forwarded(&forward->frec_src);" },
+            .{ .where = .before, .line = "if (option_bool(OPT_EXTRALOG) && src != &forward->frec_src)", .text = "\t      dnsmasq_otel_query_answered(src);" },
         },
-    } },
+    },
     .{ .file = "log.c", .edits = &.{
         include_otel,
         .{

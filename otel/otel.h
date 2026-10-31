@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 struct server;
+struct frec_src;
 
 /* Called by the patched dnsmasq. Each is a no-op in a process other than the one
    which started the SDK: forked TCP and script helpers have none of its threads. */
@@ -21,6 +22,12 @@ void dnsmasq_otel_init(void);
 void dnsmasq_otel_poll(void);
 /* A reply was received from an upstream server. */
 void dnsmasq_otel_upstream_reply(struct server *server, unsigned int millis);
+/* A query arrived. It is answered either by dnsmasq (cache, hosts, ...) or, once it is forwarded
+   (to each of those who asked it, if they are several), by an upstream server. */
+void dnsmasq_otel_query_received(void);
+void dnsmasq_otel_query_answered_locally(void);
+void dnsmasq_otel_query_forwarded(const struct frec_src *src);
+void dnsmasq_otel_query_answered(const struct frec_src *src);
 /* A message is being logged. */
 void dnsmasq_otel_log(int priority, const char *facility, const char *format, va_list ap);
 
@@ -34,6 +41,7 @@ void otel_observe_gauge(const char *name, uint64_t value);
 void otel_observe_server(const char *address, uint64_t queries, uint64_t failed_queries,
 			 uint64_t nxdomain_replies, uint64_t retries);
 void otel_record_upstream_latency(const char *server, double millis);
+void otel_record_query_duration(int upstream, double millis);
 void otel_log(int priority, const char *facility, const char *message);
 
 #endif

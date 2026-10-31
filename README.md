@@ -87,18 +87,21 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 ~/.local/bin/dnsmasq --keep-in
 ```
 
 Data is sent with OTLP over HTTP, to a collector on the same machine unless told otherwise: `127.0.0.1:4318`, an address rather than `localhost` so that exporting never needs a lookup by dnsmasq itself.
-The standard variables select another one: `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_PROTOCOL` (`http/protobuf` or `http/json`: gRPC is not built), `OTEL_SERVICE_NAME` (`dnsmasq`), `OTEL_RESOURCE_ATTRIBUTES`, and `OTEL_METRIC_EXPORT_INTERVAL` (here 10 seconds rather than 60: the SDK keeps every measurement until it exports them).
+The standard variables select another one: `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_PROTOCOL` (`http/protobuf` or `http/json`: gRPC is not built), `OTEL_SERVICE_NAME` (`dnsmasq`), `OTEL_RESOURCE_ATTRIBUTES`, and `OTEL_METRIC_EXPORT_INTERVAL` (here 1 second rather than 60, which is also the resolution of the metrics, and the SDK keeps every measurement until it exports them: the longer, the more memory).
+The collector can batch the points before sending them on, for example with its `batch` processor, without losing that resolution.
 
 | Name | Kind | What |
 |:-----|:-----|:-----|
 | `dnsmasq.<counter>` | cumulative counter | Each of dnsmasq's own counters, reported as they are, once it is not zero: `dns_queries_forwarded`, `dns_local_answered`, `dns_auth_answered`, `dns_cache_inserted`, `dhcp_ack`, ... |
 | `dnsmasq.tcp_connections` | gauge | How many processes are serving TCP queries now |
 | `dnsmasq.server.queries`, `.failed_queries`, `.nxdomain_replies`, `.retries` | cumulative counter | The same for each upstream server, as `server.address`. A server which goes away keeps its last values |
-| `dnsmasq.upstream.duration` | histogram, ms | The time from sending a query to an upstream server to its reply, by `server.address` |
+| `dnsmasq.query.duration` | histogram, ms | The time from a query arriving to its reply being sent, by `dnsmasq.answer`: `local` when dnsmasq answers (from its cache, its hosts, an `--address`, or with an error) and `upstream` when it waited for a server, retries included |
+| `dnsmasq.upstream.duration` | histogram, ms | The time from sending a query to an upstream server to its reply, by `server.address`: the last attempt only, and none for a retry that was not answered. Both histograms have the same buckets, from 0.02 ms to 5 s |
 | logs | | What dnsmasq logs, with its syslog priority as the severity (the number [OpenTelemetry maps it to](https://opentelemetry.io/docs/specs/otel/logs/data-model-appendix/#appendix-b-severitynumber-example-mappings), and its name as the text), and `dnsmasq.facility` (`dhcp`, `tftp`, `script` or `debug`, and none for DNS). Queries are only logged with `--log-queries` |
 
 Counters are cumulative, as dnsmasq keeps them: rates, such as queries per second, and deltas are for the collector or the backend to compute.
-Answers from the cache are not in the histogram, as they do not wait for anyone.
+Answers from the cache are not in `dnsmasq.upstream.duration`, as they do not wait for anyone, but they are in `dnsmasq.query.duration`.
+The durations are measured by dnsmasq: from when it starts handling a query, not from when the packet reached the socket.
 
 What is not exported:
 - What dnsmasq logs while starting: the SDK starts once it runs, as it uses threads, which do not survive the forks of the daemonization.

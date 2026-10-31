@@ -18,8 +18,9 @@ const allocator = std.heap.c_allocator;
 /// An address, rather than a name: looking one up could end up asking dnsmasq itself, from its only thread.
 const default_endpoint = "127.0.0.1:4318";
 
-/// A short interval: the SDK keeps every measurement until it exports, rather than aggregating them as they come.
-const default_export_interval_ms = "10000";
+/// A short interval, as the collector is on the same machine: one point per second, and the SDK keeps every
+/// measurement until it exports, rather than aggregating them as they come.
+const default_export_interval_ms = "1000";
 
 const Histogram = sdk.metrics.Histogram(f64);
 
@@ -43,6 +44,11 @@ const DataPoint = @typeInfo(@FieldType(MeasurementsData, "int")).pointer.child;
 
 var meter: Meter = undefined;
 var upstream_latency: *Histogram = undefined;
+var query_duration: *Histogram = undefined;
+
+/// In ms, down to what dnsmasq takes to answer from its cache, for all the durations so that they can be compared.
+/// The SDK's defaults start at 5 ms.
+const duration_buckets = [_]f64{ 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000 };
 
 /// What one of dnsmasq's values was worth when it last said
 const Observed = struct { value: std.atomic.Value(u64) };
@@ -67,6 +73,7 @@ comptime {
     @export(&observeGauge, .{ .name = "otel_observe_gauge" });
     @export(&observeServer, .{ .name = "otel_observe_server" });
     @export(&recordUpstreamLatency, .{ .name = "otel_record_upstream_latency" });
+    @export(&recordQueryDuration, .{ .name = "otel_record_query_duration" });
     @export(&log, .{ .name = "otel_log" });
 }
 
@@ -118,6 +125,16 @@ fn startSdk() !void {
         sdk_config.metrics_config.export_timeout_ms,
     );
     meter = try meter_provider.getMeter(.{ .name = "dnsmasq", .version = build_options.version });
+    try meter_provider.addView(.{
+        .instrument_selector = .{ .kind = .Histogram },
+        .aggregation = .{ .ExplicitBucketHistogram = .{ .buckets = &duration_buckets } },
+        .temporality = .Cumulative,
+    });
+    query_duration = try meter.createHistogram(f64, .{
+        .name = "dnsmasq.query.duration",
+        .description = "Time between a query arriving and its reply being sent, whether dnsmasq answered or an upstream server did",
+        .unit = "ms",
+    });
     upstream_latency = try meter.createHistogram(f64, .{
         .name = "dnsmasq.upstream.duration",
         .description = "Time between forwarding a query to an upstream server and its reply",
@@ -252,6 +269,10 @@ fn observeServer(address: [*:0]const u8, queries: u64, failed_queries: u64, nxdo
 fn recordUpstreamLatency(server: [*:0]const u8, millis: f64) callconv(.c) void {
     const value = intern(std.mem.span(server)) orelse return;
     upstream_latency.record(millis, .{ "server.address", value }) catch {};
+}
+
+fn recordQueryDuration(upstream: c_int, millis: f64) callconv(.c) void {
+    query_duration.record(millis, .{ "dnsmasq.answer", if (upstream != 0) "upstream" else "local" }) catch {};
 }
 
 /// The OpenTelemetry severity numbers of the syslog priorities, from its specification:

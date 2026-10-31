@@ -16,6 +16,16 @@ static char names[__METRIC_MAX][64];
 static unsigned int said_metric[__METRIC_MAX];
 static int said_gauge = 0;
 
+/* When the query being handled arrived, and when each of those waiting for an upstream server did.
+   Those are told apart by the address of their frec_src, which stays the same for as long as they wait.
+   A table where two of them share a slot loses the older one's duration, which is not worth a list. */
+#define MAX_WAITING 4096
+static uint64_t received_at = 0;
+static struct {
+  const struct frec_src *src;
+  uint64_t received_at;
+} waiting[MAX_WAITING];
+
 static int active(void)
 {
   return otel_pid != 0 && getpid() == otel_pid;
@@ -126,6 +136,49 @@ void dnsmasq_otel_upstream_reply(struct server *server, unsigned int millis)
 
   prettyprint_addr(&server->addr, addr);
   otel_record_upstream_latency(addr, millis);
+}
+
+static uint64_t nanoseconds(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+static size_t slot(const struct frec_src *src)
+{
+  return ((uintptr_t)src >> 4) % MAX_WAITING;
+}
+
+void dnsmasq_otel_query_received(void)
+{
+  if (active())
+    received_at = nanoseconds();
+}
+
+void dnsmasq_otel_query_answered_locally(void)
+{
+  if (active())
+    otel_record_query_duration(0, (nanoseconds() - received_at) / 1e6);
+}
+
+void dnsmasq_otel_query_forwarded(const struct frec_src *src)
+{
+  if (!active())
+    return;
+
+  waiting[slot(src)].src = src;
+  waiting[slot(src)].received_at = received_at;
+}
+
+void dnsmasq_otel_query_answered(const struct frec_src *src)
+{
+  if (!active() || waiting[slot(src)].src != src)
+    return;
+
+  waiting[slot(src)].src = NULL;
+  otel_record_query_duration(1, (nanoseconds() - waiting[slot(src)].received_at) / 1e6);
 }
 
 void dnsmasq_otel_log(int priority, const char *facility, const char *format, va_list ap)
