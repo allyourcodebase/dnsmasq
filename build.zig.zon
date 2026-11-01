@@ -8,6 +8,8 @@
         "build.zig",
         "build.zig.zon",
         "generated.zig",
+        "patch.zig",
+        "otel",
         "LICENSE",
         "README.md",
     },
@@ -16,6 +18,14 @@
         .upstream = .{
             .url = "https://thekelleys.org.uk/dnsmasq/dnsmasq-2.93.tar.xz",
             .hash = "N-V-__8AAEFZNQBHd53gdas1GOeuBrl3UIEdm798GGW817ml",
+        },
+        // The commit of https://github.com/open-telemetry/opentelemetry-zig/pull/122, which makes observable counters
+        // report their totals: with the SDK's main, each of their observations is added to the previous ones.
+        // Once it is merged, point this back at open-telemetry/opentelemetry-zig.
+        .opentelemetry = .{
+            .url = "git+https://github.com/inge4pres/opentelemetry-zig#4c0143df35db7857355d59ef134899cafd7a35a9",
+            .hash = "opentelemetry-0.0.1-U_uKJ5I6JgDrPBVpVTqkdJmqNGSqXJk1-tVobSZA6MTk",
+            .lazy = true,
         },
     },
 }

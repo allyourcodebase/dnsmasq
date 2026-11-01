@@ -14,6 +14,15 @@ It is run by the `generate` step of [build.zig](build.zig), which writes `genera
 
 Then run `zig build test`.
 
+## OpenTelemetry patches
+
+The `opentelemetry` dependency is pinned to the commit of [opentelemetry-zig#122](https://github.com/open-telemetry/opentelemetry-zig/pull/122), from a fork, until it is merged: dnsmasq's counters are observable counters, which the SDK's main adds up on each export.
+Then run `zig fetch --save=opentelemetry git+https://github.com/open-telemetry/opentelemetry-zig#<commit>`, and put `.lazy = true` back.
+
+With `-Dotel`, a few lines are inserted next to given lines of `dnsmasq.c`, `forward.c` and `log.c`, by `patch.zig`: see `otel_patches` in `build.zig`.
+If a new release changes or duplicates one of those lines, `zig build -Dotel` fails saying which: move the insertion to where the line went.
+Check the hooks still make sense (a `-Dotel` build and `zig build test -Dotel` are not enough), for example against a collector and a dnsmasq upstream.
+
 ## Why a tarball and not `git+https`?
 
 Upstream's git server only speaks version 0 of the git protocol, which Zig cannot fetch from, and the mirrors on GitHub lag behind the releases.

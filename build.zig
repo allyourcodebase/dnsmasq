@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zon = @import("build.zig.zon");
 const gen = @import("generated.zig");
 
@@ -33,6 +34,12 @@ pub fn build(b: *Build) void {
         bool,
         "broken_rtc",
         "For systems without a real-time clock keeping time across reboots: use uptime, and store lease lengths instead of expiry times. Defaults to false",
+    ) orelse false;
+
+    const otel = b.option(
+        bool,
+        "otel",
+        "Export metrics and logs with OpenTelemetry (OTLP over HTTP, to localhost:4318 unless the OTEL_* environment variables say otherwise). Patches dnsmasq. Needs Zig 0.17 or later. Defaults to false",
     ) orelse false;
 
     var enabled: [features.len]bool = undefined;
@@ -75,14 +82,19 @@ pub fn build(b: *Build) void {
         .strip = strip,
         .pic = pic,
     });
-    mod.addCSourceFiles(.{
-        .root = upstream.path("src"),
-        .files = &gen.sources,
-        // Upstream relies on undefined behavior, which Zig turns into a crash in Debug and ReleaseSafe:
-        // it casts the address of a `struct sockaddr_in`'s field to a `union all_addr *`, which is more aligned
-        .flags = &.{"-fno-sanitize=undefined"},
-    });
+    // Upstream relies on undefined behavior, which Zig turns into a crash in Debug and ReleaseSafe:
+    // it casts the address of a `struct sockaddr_in`'s field to a `union all_addr *`, which is more aligned
+    const flags: []const []const u8 = &.{"-fno-sanitize=undefined"};
+
+    // The sources the OpenTelemetry hooks go into are patched copies
+    var sources: std.ArrayList([]const u8) = .empty;
+    inline for (gen.sources) |source| {
+        if (!otel or !isPatched(source)) sources.append(b.allocator, source) catch @panic("OOM");
+    }
+    mod.addCSourceFiles(.{ .root = upstream.path("src"), .files = sources.items, .flags = flags });
     mod.addCMacro("VERSION", b.fmt("\"{s}\"", .{upstreamVersion()}));
+
+    if (otel and !addOpenTelemetry(b, mod, upstream, target, optimize, strip, flags)) return;
 
     inline for (features, enabled) |feature, flag| {
         if (!flag) mod.addCMacro(feature.no_macro, "1");
@@ -150,6 +162,133 @@ pub fn build(b: *Build) void {
     features_test.addFileArg(config_file);
     features_test.expectStdErrEqual("dnsmasq: syntax check OK.\n");
     test_step.dependOn(&features_test.step);
+}
+
+/// Where the OpenTelemetry hooks go into upstream's sources: next to the one line which is `line`, once its whitespace is trimmed.
+/// The build fails if upstream changed such that there isn't exactly one, see patch.zig.
+const Edit = struct {
+    where: enum { before, after },
+    line: []const u8,
+    text: []const u8,
+};
+
+const Patch = struct {
+    file: []const u8,
+    edits: []const Edit,
+};
+
+const include_otel: Edit = .{ .where = .after, .line = "#include \"dnsmasq.h\"", .text = "#include \"otel.h\"" };
+
+const otel_patches = [_]Patch{
+    .{
+        .file = "dnsmasq.c",
+        .edits = &.{
+            include_otel,
+            // Once running, and so forked and with its privileges dropped: the SDK has threads, which do not survive a fork
+            .{ .where = .before, .line = "/* finished start-up - release original process */", .text = "  dnsmasq_otel_init();\n" },
+            .{ .where = .after, .line = "int timeout = fast_retry(now);", .text = "      dnsmasq_otel_poll();" },
+        },
+    },
+    .{
+        .file = "forward.c",
+        .edits = &.{
+            include_otel,
+            .{
+                .where = .after,
+                .line = "server->query_latency = server->mma_latency/128;",
+                .text = "  dnsmasq_otel_upstream_reply(server, dnsmasq_milliseconds() - forward->forward_timestamp);",
+            },
+            // The time to answer a query, from when it arrives until the reply is sent, by dnsmasq itself or once an upstream server answered
+            .{ .where = .before, .line = "dst_addr_4.s_addr = dst_addr.addr4.s_addr = 0;", .text = "  dnsmasq_otel_query_received();" },
+            .{ .where = .before, .line = "daemon->metrics[metric]++;", .text = "      dnsmasq_otel_query_answered_locally();" },
+            // Answered by dnsmasq too: an address it was given, or an error
+            .{
+                .where = .after,
+                .line = "send_from(udpfd, option_bool(OPT_NOWILD) || option_bool(OPT_CLEVERBIND), (char *)header, plen, udpaddr, dst_addr, dst_iface);",
+                .text = "      dnsmasq_otel_query_answered_locally();",
+            },
+            .{ .where = .after, .line = "src->orig_id = id;", .text = "\t  dnsmasq_otel_query_forwarded(src);" },
+            .{ .where = .after, .line = "forward->frec_src.orig_id = ntohs(header->id);", .text = "      dnsmasq_otel_query_forwarded(&forward->frec_src);" },
+            .{ .where = .before, .line = "if (option_bool(OPT_EXTRALOG) && src != &forward->frec_src)", .text = "\t      dnsmasq_otel_query_answered(src);" },
+        },
+    },
+    .{ .file = "log.c", .edits = &.{
+        include_otel,
+        .{
+            .where = .before,
+            .line = "if (echo_stderr)",
+            .text = "  va_start(ap, format);\n  dnsmasq_otel_log(priority, func, format, ap);\n  va_end(ap);\n",
+        },
+    } },
+};
+
+fn isPatched(source: []const u8) bool {
+    for (otel_patches) |patch| {
+        if (std.mem.eql(u8, patch.file, source)) return true;
+    }
+    return false;
+}
+
+fn addOpenTelemetry(
+    b: *Build,
+    mod: *Build.Module,
+    upstream: *Build.Dependency,
+    target: Build.ResolvedTarget,
+    optimize: anytype,
+    strip: ?bool,
+    flags: []const []const u8,
+) bool {
+    if (comptime builtin.zig_version.order(.{ .major = 0, .minor = 17, .patch = 0 }) == .lt) {
+        const fail = b.addFail("-Dotel needs Zig 0.17 or later, which the OpenTelemetry SDK requires");
+        b.getInstallStep().dependOn(&fail.step);
+        return false;
+    }
+
+    // A lazy dependency: only those who ask for OpenTelemetry fetch it
+    const sdk = b.lazyDependency("opentelemetry", .{
+        .target = target,
+        // The SDK only has a choice of safe or not, whatever ours is
+        .release = optimize != .debug,
+    }) orelse return true;
+
+    const patch = b.addExecutable(.{
+        .name = "patch",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("patch.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    for (otel_patches) |patched| {
+        const run = b.addRunArtifact(patch);
+        run.addFileArg(upstream.path(b.fmt("src/{s}", .{patched.file})));
+        const output = run.addOutputFileArg(patched.file);
+        for (patched.edits) |edit| run.addArgs(&.{ if (edit.where == .before) "--before" else "--after", edit.line, edit.text });
+        mod.addCSourceFile(.{ .file = output, .flags = flags });
+    }
+    // The patched copies are elsewhere than the headers they include
+    mod.addIncludePath(upstream.path("src"));
+    mod.addIncludePath(b.path("otel"));
+    mod.addCSourceFile(.{ .file = b.path("otel/glue.c") });
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", upstreamVersion());
+    const hooks = b.addLibrary(.{
+        .name = "dnsmasq-otel",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("otel/otel.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .strip = strip,
+            .imports = &.{
+                .{ .name = "opentelemetry-sdk", .module = sdk.module("sdk") },
+                .{ .name = "build_options", .module = options.createModule() },
+            },
+        }),
+    });
+    mod.linkLibrary(hooks);
+    return true;
 }
 
 /// The version of dnsmasq, which is the package's one without the patch number (upstream's are `major.minor`)
